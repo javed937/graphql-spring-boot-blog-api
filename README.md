@@ -160,10 +160,31 @@ Variables:
 | 1 | Foundations — schema, types, Spring Boot setup | ✅ |
 | 2 | Schema first — `.graphqls`, JPA entities, `@QueryMapping` | ✅ |
 | 3 | CRUD — queries, mutations, input types, service layer | ✅ |
-| 4 | N+1 fix — `DataLoader`, `BatchLoaderRegistry` | ⬜ |
-| 5 | Advanced — pagination, error handling, subscriptions, security | ⬜ |
+| 4 | N+1 fix — `DataLoader`, `BatchLoaderRegistry` | ✅ |
+| 5 | Advanced — pagination, error handling, subscriptions, security | ✅ |
 
 See [plan.md](plan.md) for detailed task breakdown.
+
+## Features Implemented
+
+| Feature | Details |
+|---------|---------|
+| GraphQL Schema | Queries, mutations, subscriptions, input types |
+| CRUD | Users, Posts, Comments with full relationships |
+| N+1 Fix | `DataLoader` + `BatchLoaderRegistry` batching |
+| Pagination | Relay connection pattern with cursor-based navigation |
+| Error Handling | `DataFetcherExceptionResolver` with structured error codes |
+| Subscriptions | Real-time `commentAdded` via WebSocket (`graphql-ws`) |
+| Security | Spring Security with role-based `@PreAuthorize` on mutations |
+
+## Users (for testing)
+
+| Username | Password | Role |
+|----------|----------|------|
+| `user` | `password` | USER — can query, createPost, addComment |
+| `admin` | `admin` | ADMIN — full access including delete, createUser |
+
+Login at **http://localhost:8081/login** before using secured mutations.
 
 ## Known Issues / Notes
 
