@@ -66,9 +66,9 @@ Press **F5** → select **"Run Spring Boot"**. Set breakpoints in `BlogControlle
 
 | URL | Purpose |
 |-----|---------|
-| `http://localhost:8081/graphiql.html` | GraphiQL explorer |
-| `http://localhost:8081/h2-console` | H2 database console |
-| `http://localhost:8081/graphql` | GraphQL HTTP endpoint |
+| `http://localhost:8080/graphiql.html` | GraphiQL explorer |
+| `http://localhost:8080/h2-console` | H2 database console |
+| `http://localhost:8080/graphql` | GraphQL HTTP endpoint |
 
 ### H2 Console credentials
 
@@ -120,7 +120,7 @@ query {
 }
 ```
 
-**Create a user:**
+**Create a user (requires ADMIN role):**
 
 ```graphql
 mutation {
@@ -153,6 +153,144 @@ Variables:
 }
 ```
 
+## Testing Real-Time Subscriptions
+
+Subscriptions use WebSocket (`graphql-ws` protocol) and push new comments to all active subscribers instantly.
+
+### Step 1 — Log in
+
+Go to **http://localhost:8080/login** and sign in with:
+
+| Field | Value |
+|-------|-------|
+| Username | `user` |
+| Password | `password` |
+
+You will be redirected to GraphiQL automatically.
+
+### Step 2 — Open two browser tabs
+
+Open **http://localhost:8080/graphiql.html** in **two separate tabs** in the same browser (the login session cookie is shared).
+
+### Step 3 — Start the subscription (Tab 1)
+
+In the first tab, paste the following and click the **▶ Run** button:
+
+```graphql
+subscription {
+  commentAdded(postId: "1") {
+    id
+    text
+    author {
+      name
+    }
+  }
+}
+```
+
+You will see a **spinner / loading indicator** appear in the result panel — this means the WebSocket connection is open and the subscription is active.
+
+> **Note:** The subscription listens for new comments on post `id=1` ("Hello GraphQL"). To listen to post `id=2` ("Spring Boot Tips"), change `postId` to `"2"`.
+
+### Step 4 — Fire the mutation (Tab 2)
+
+In the second tab, paste the following and click **▶ Run**:
+
+```graphql
+mutation {
+  addComment(input: {
+    text: "Hello from the browser!"
+    postId: "1"
+    authorId: "1"
+  }) {
+    id
+    text
+  }
+}
+```
+
+### Step 5 — See the result in real time (Tab 1)
+
+Switch back to Tab 1. The new comment appears immediately in the subscription result panel:
+
+```json
+{
+  "data": {
+    "commentAdded": {
+      "id": "4",
+      "text": "Hello from the browser!",
+      "author": {
+        "name": "Alice"
+      }
+    }
+  }
+}
+```
+
+Every time you run the mutation in Tab 2, a new entry is pushed to Tab 1 without refreshing.
+
+### How it works
+
+```
+Tab 2 (mutation)                     Server                        Tab 1 (subscription)
+──────────────────                   ──────────────────            ─────────────────────
+addComment mutation  ──HTTP POST───► BlogService.addComment()
+                                      │
+                                      └─ CommentPublisher.publish()
+                                           │
+                                           └─ Reactor Sink ──WebSocket push──► commentAdded result
+```
+
+1. `addComment` saves the comment and calls `CommentPublisher.publish(comment, postId)`.
+2. The Reactor `Sinks.Many` buffers the event and delivers it on a separate thread.
+3. Spring for GraphQL resolves the subscription fields (`id`, `text`, `author { name }`).
+4. The result is pushed over WebSocket to all active subscribers for that `postId`.
+
+### Subscription with curl (for API testing)
+
+You can also verify the full pipeline without a browser. Start the WebSocket subscriber in one terminal:
+
+```bash
+# Install dependencies (one-time)
+mkdir /tmp/ws-test && cd /tmp/ws-test
+npm init -y && npm install graphql-ws ws
+
+# subscriber.mjs
+cat > subscriber.mjs << 'EOF'
+import { createClient } from 'graphql-ws';
+import { WebSocket } from 'ws';
+
+const client = createClient({
+  url: 'ws://localhost:8080/graphql-ws',
+  webSocketImpl: WebSocket,
+});
+
+client.subscribe(
+  { query: `subscription { commentAdded(postId: "1") { id text author { name } } }` },
+  {
+    next: (data) => console.log('RECEIVED:', JSON.stringify(data, null, 2)),
+    error: (err) => console.error('ERROR:', err),
+    complete: () => console.log('Subscription closed.'),
+  }
+);
+
+setTimeout(() => process.exit(0), 60000);
+EOF
+
+node subscriber.mjs
+```
+
+In a second terminal, fire the mutation with HTTP Basic auth:
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"mutation{addComment(input:{text:\"curl test\",postId:\"1\",authorId:\"1\"}){id text}}"}'
+```
+
+The first terminal will print the pushed event within milliseconds.
+
 ## Learning Plan
 
 | Phase | Topic | Status |
@@ -184,7 +322,7 @@ See [plan.md](plan.md) for detailed task breakdown.
 | `user` | `password` | USER — can query, createPost, addComment |
 | `admin` | `admin` | ADMIN — full access including delete, createUser |
 
-Login at **http://localhost:8081/login** before using secured mutations.
+Login at **http://localhost:8080/login** before using secured mutations.
 
 ## Known Issues / Notes
 

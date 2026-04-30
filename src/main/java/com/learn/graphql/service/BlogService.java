@@ -195,7 +195,7 @@ public class BlogService {
         Comment comment = Comment.builder().text(text).post(post).author(author).build();
         Comment saved = commentRepository.save(comment);
         log.info("Service: addComment -> saved with id={}", saved.getId());
-        commentPublisher.publish(saved);
+        commentPublisher.publish(saved, postId);
         return saved;
     }
 }

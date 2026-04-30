@@ -27,6 +27,6 @@ public class DataSeeder implements CommandLineRunner {
         blogService.addComment("Thanks Bob!", post1.getId(), alice.getId());
         blogService.addComment("Very helpful!", post2.getId(), alice.getId());
 
-        log.info("Seed data loaded. Visit http://localhost:8080/graphiql to explore.");
+        log.info("Seed data loaded. Visit http://localhost:8080/graphiql.html to explore.");
     }
 }

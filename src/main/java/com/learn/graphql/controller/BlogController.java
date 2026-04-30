@@ -19,6 +19,7 @@ import org.springframework.graphql.data.method.annotation.SubscriptionMapping;
 import org.springframework.security.access.prepost.PreAuthorize;
 import reactor.core.publisher.Flux;
 
+import jakarta.persistence.Persistence;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -111,8 +112,15 @@ public class BlogController {
     @SchemaMapping(typeName = "Comment", field = "author")
     public CompletableFuture<User> authorForComment(Comment comment,
                                                     DataLoader<Long, User> userById) {
+        User author = comment.getAuthor();
+        // If author is already initialized in memory (e.g. from a subscription-published comment),
+        // return it directly — DataLoader dispatch is unreliable per subscription event.
+        if (Persistence.getPersistenceUtil().isLoaded(author)) {
+            log.debug("Comment.author already loaded for commentId={}, skipping DataLoader", comment.getId());
+            return CompletableFuture.completedFuture(author);
+        }
         log.debug("DataLoader: queuing Comment.author for commentId={}", comment.getId());
-        return userById.load(comment.getAuthor().getId());
+        return userById.load(author.getId());
     }
 
     @SchemaMapping(typeName = "Comment", field = "post")
