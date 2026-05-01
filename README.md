@@ -1,6 +1,6 @@
 # graphql-spring-boot-blog-api
 
-A hands-on blog API for learning GraphQL from scratch using Spring Boot 3, Spring Data JPA, and H2. Covers schema design, queries, mutations, nested resolvers, and the N+1 problem.
+A hands-on blog API GraphQL using Spring Boot 3, Spring Data JPA, and H2. Covers schema design, queries, mutations, nested resolvers, and the N+1 problem.
 
 ## Tech Stack
 
@@ -90,6 +90,8 @@ type Query {
     post(id: ID!): Post
     postsByUser(userId: ID!): [Post!]!
     commentsByPost(postId: ID!): [Comment!]!
+    commentsById(commentId: ID!): Comment
+    postsConnection(first: Int, after: String): PostConnection!
 }
 
 type Mutation {
@@ -97,41 +99,341 @@ type Mutation {
     createPost(input: CreatePostInput!): Post!
     deletePost(id: ID!): Boolean!
     addComment(input: AddCommentInput!): Comment!
+    deleteComment(id: ID!): Boolean
+}
+
+type Subscription {
+    commentAdded(postId: ID!): Comment!
+}
+
+type User {
+    id: ID!
+    name: String!
+    email: String!
+    posts: [Post!]!
+}
+
+type Post {
+    id: ID!
+    title: String!
+    content: String!
+    author: User!
+    comments: [Comment!]!
+}
+
+type Comment {
+    id: ID!
+    text: String!
+    author: User!
+    post: Post!
+}
+
+type PostConnection {
+    edges: [PostEdge!]!
+    pageInfo: PageInfo!
+    totalCount: Int!
+}
+
+type PostEdge {
+    node: Post!
+    cursor: String!
+}
+
+type PageInfo {
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+    startCursor: String
+    endCursor: String
+}
+
+input CreateUserInput {
+    name: String!
+    email: String!
+}
+
+input CreatePostInput {
+    title: String!
+    content: String!
+    authorId: ID!
+}
+
+input AddCommentInput {
+    text: String!
+    postId: ID!
+    authorId: ID!
 }
 ```
 
-## Sample Queries
+## API Reference
 
-**Fetch all users with nested posts and comments:**
+All operations are HTTP POST to `http://localhost:8080/graphql` with `Content-Type: application/json`. Authentication uses HTTP Basic auth.
+
+| Role | Header value | Plaintext |
+|------|-------------|-----------|
+| USER | `Basic dXNlcjpwYXNzd29yZA==` | `user:password` |
+| ADMIN | `Basic YWRtaW46YWRtaW4=` | `admin:admin` |
+
+> **Postman tip:** In Postman click **Import → Paste Raw Text**, paste any curl command below, and it will populate the method, URL, headers, and body automatically.
+
+---
+
+### Queries
+
+Queries have no role guard — any authenticated user can call them.
+
+#### `users` — list all users
+
+Returns all users. Nested `posts` are batch-loaded (no N+1).
 
 ```graphql
 query {
   users {
     id
     name
-    posts {
-      title
-      comments {
-        text
-        author { name }
-      }
+    email
+    posts { id title }
+  }
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"{ users { id name email posts { id title } } }"}'
+```
+
+---
+
+#### `user(id)` — single user by ID
+
+Returns one user or a structured `NOT_FOUND` error if the ID does not exist.
+
+```graphql
+query {
+  user(id: "1") {
+    id
+    name
+    email
+    posts { id title }
+  }
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"{ user(id: \"1\") { id name email posts { id title } } }"}'
+```
+
+---
+
+#### `posts` — list all posts
+
+Returns all posts with nested author and comments. Author and comments are batch-loaded via DataLoader.
+
+```graphql
+query {
+  posts {
+    id
+    title
+    content
+    author { id name }
+    comments { id text author { name } }
+  }
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"{ posts { id title content author { id name } comments { id text author { name } } } }"}'
+```
+
+---
+
+#### `post(id)` — single post by ID
+
+Returns one post or a `NOT_FOUND` error.
+
+```graphql
+query {
+  post(id: "1") {
+    id
+    title
+    content
+    author { name email }
+    comments { text author { name } }
+  }
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"{ post(id: \"1\") { id title content author { name email } comments { text author { name } } } }"}'
+```
+
+---
+
+#### `postsByUser(userId)` — all posts by a user
+
+Filters posts by author ID. Returns an empty list (not an error) if the user has no posts.
+
+```graphql
+query {
+  postsByUser(userId: "1") {
+    id
+    title
+    content
+  }
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"{ postsByUser(userId: \"1\") { id title content } }"}'
+```
+
+---
+
+#### `commentsByPost(postId)` — all comments on a post
+
+Returns all comments for a given post. Each comment exposes its `post` back-reference if needed.
+
+```graphql
+query {
+  commentsByPost(postId: "1") {
+    id
+    text
+    author { name }
+    post { title }
+  }
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"{ commentsByPost(postId: \"1\") { id text author { name } post { title } } }"}'
+```
+
+---
+
+#### `commentsById(commentId)` — single comment by ID
+
+Returns one comment or a `NOT_FOUND` error.
+
+```graphql
+query {
+  commentsById(commentId: "1") {
+    id
+    text
+    author { name }
+    post { id title }
+  }
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"{ commentsById(commentId: \"1\") { id text author { name } post { id title } } }"}'
+```
+
+---
+
+#### `postsConnection(first, after)` — cursor-paginated posts
+
+Implements the Relay connection pattern. `first` sets the page size (default 10). `after` is an opaque base64 cursor taken from a previous response's `endCursor`. Omit `after` to start from the beginning.
+
+```graphql
+query {
+  postsConnection(first: 2) {
+    totalCount
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    edges {
+      cursor
+      node { id title author { name } }
     }
   }
 }
 ```
 
-**Create a user (requires ADMIN role):**
+```bash
+# First page
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"{ postsConnection(first: 2) { totalCount pageInfo { hasNextPage endCursor } edges { cursor node { id title author { name } } } } }"}'
+
+# Next page — replace the after value with endCursor from the previous response
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"{ postsConnection(first: 2, after: \"Y3Vyc29yOjE=\") { totalCount pageInfo { hasNextPage endCursor } edges { cursor node { id title } } } }"}'
+```
+
+---
+
+### Mutations
+
+#### `createUser` — create a user *(ADMIN only)*
+
+Requires the `ADMIN` role. Returns the newly created user.
 
 ```graphql
 mutation {
   createUser(input: { name: "Carol", email: "carol@example.com" }) {
     id
     name
+    email
   }
 }
 ```
 
-**Using variables:**
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
+  -d '{"query":"mutation { createUser(input: { name: \"Carol\", email: \"carol@example.com\" }) { id name email } }"}'
+```
+
+---
+
+#### `createPost` — create a post *(authenticated)*
+
+Any authenticated user can create a post. `authorId` must reference an existing user, otherwise a `NOT_FOUND` error is returned.
+
+```graphql
+mutation {
+  createPost(input: { title: "My Post", content: "Hello GraphQL!", authorId: "1" }) {
+    id
+    title
+    content
+    author { name }
+  }
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"mutation { createPost(input: { title: \"My Post\", content: \"Hello GraphQL!\", authorId: \"1\" }) { id title content author { name } } }"}'
+```
+
+Using GraphQL variables (recommended for dynamic values):
 
 ```graphql
 mutation CreatePost($title: String!, $content: String!, $authorId: ID!) {
@@ -143,14 +445,73 @@ mutation CreatePost($title: String!, $content: String!, $authorId: ID!) {
 }
 ```
 
-Variables:
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"mutation CreatePost($title: String!, $content: String!, $authorId: ID!) { createPost(input: { title: $title, content: $content, authorId: $authorId }) { id title author { name } } }","variables":{"title":"My Post","content":"Hello GraphQL!","authorId":"1"}}'
+```
 
-```json
-{
-  "title": "My Post",
-  "content": "Hello GraphQL!",
-  "authorId": "1"
+---
+
+#### `deletePost(id)` — delete a post *(ADMIN only)*
+
+Returns `true` if the post was deleted, `false` if the ID was not found. Also deletes all comments on that post (cascade).
+
+```graphql
+mutation {
+  deletePost(id: "1")
 }
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
+  -d '{"query":"mutation { deletePost(id: \"1\") }"}'
+```
+
+---
+
+#### `addComment` — add a comment *(authenticated)*
+
+Any authenticated user can comment. After saving, the server publishes the comment to the `commentAdded` subscription Flux — all active WebSocket subscribers for that `postId` receive it instantly.
+
+```graphql
+mutation {
+  addComment(input: { text: "Great post!", postId: "1", authorId: "2" }) {
+    id
+    text
+    author { name }
+    post { title }
+  }
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
+  -d '{"query":"mutation { addComment(input: { text: \"Great post!\", postId: \"1\", authorId: \"2\" }) { id text author { name } post { title } } }"}'
+```
+
+---
+
+#### `deleteComment(id)` — delete a comment *(ADMIN only)*
+
+Returns `true` if deleted, `false` if the ID was not found.
+
+```graphql
+mutation {
+  deleteComment(id: "1")
+}
+```
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
+  -d '{"query":"mutation { deleteComment(id: \"1\") }"}'
 ```
 
 ## Testing Real-Time Subscriptions
@@ -290,18 +651,6 @@ curl -s http://localhost:8080/graphql \
 ```
 
 The first terminal will print the pushed event within milliseconds.
-
-## Learning Plan
-
-| Phase | Topic | Status |
-|-------|-------|--------|
-| 1 | Foundations — schema, types, Spring Boot setup | ✅ |
-| 2 | Schema first — `.graphqls`, JPA entities, `@QueryMapping` | ✅ |
-| 3 | CRUD — queries, mutations, input types, service layer | ✅ |
-| 4 | N+1 fix — `DataLoader`, `BatchLoaderRegistry` | ✅ |
-| 5 | Advanced — pagination, error handling, subscriptions, security | ✅ |
-
-See [plan.md](plan.md) for detailed task breakdown.
 
 ## Features Implemented
 
