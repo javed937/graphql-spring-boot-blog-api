@@ -2,6 +2,22 @@
 
 A hands-on blog API GraphQL using Spring Boot 3, Spring Data JPA, and H2. Covers schema design, queries, mutations, nested resolvers, and the N+1 problem.
 
+## Table of Contents
+
+- [Tech Stack](#tech-stack)
+- [Features Implemented](#features-implemented)
+- [Domain Model](#domain-model)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+- [Users for Testing](#users-for-testing)
+- [URLs](#urls)
+- [GraphQL Schema](#graphql-schema)
+- [API Reference](#api-reference)
+  - [Queries](#queries)
+  - [Mutations](#mutations)
+- [The N+1 Problem and DataLoader](#the-n1-problem-and-dataloader)
+- [Testing Real-Time Subscriptions](#testing-real-time-subscriptions)
+
 ## Tech Stack
 
 | Technology | Version |
