@@ -1,97 +1,151 @@
 type Query {
-    # User queries
+    "Returns all users. Nested posts are batch-loaded via DataLoader (no N+1)."
     users: [User!]!
+
+    "Returns a single user by ID. Throws NOT_FOUND if the ID does not exist."
     user(id: ID!): User
 
-    # Post queries
+    "Returns all posts. Author and comments are batch-loaded via DataLoader."
     posts: [Post!]!
+
+    "Returns a single post by ID. Throws NOT_FOUND if the ID does not exist."
     post(id: ID!): Post
+
+    "Returns all posts written by a specific user. Returns an empty list if the user has no posts."
     postsByUser(userId: ID!): [Post!]!
 
-    # Comment queries
+    "Returns all comments on a specific post."
     commentsByPost(postId: ID!): [Comment!]!
+
+    "Returns a single comment by ID. Throws NOT_FOUND if the ID does not exist."
     commentsById(commentId: ID!): Comment
 
-    # Paginated posts (Relay connection pattern)
+    """
+    Returns a cursor-paginated list of posts using the Relay Connection pattern.
+    - first: number of posts to return (default 10)
+    - after: opaque cursor from a previous response's endCursor; omit to start from the beginning
+    """
     postsConnection(first: Int, after: String): PostConnection!
 }
 
 type Mutation {
-    # User mutations
+    "Creates a new user. Requires ADMIN role. Returns the created user."
     createUser(input: CreateUserInput!): User!
 
-    # Post mutations
+    "Creates a new post. Requires authentication. authorId must reference an existing user."
     createPost(input: CreatePostInput!): Post!
+
+    """
+    Deletes a post and all its comments (cascade). Requires ADMIN role.
+    Returns true if deleted, false if the ID was not found.
+    """
     deletePost(id: ID!): Boolean!
 
-    # Comment mutations
+    """
+    Adds a comment to a post. Requires authentication.
+    Publishes the saved comment to the commentAdded subscription for real-time delivery.
+    """
     addComment(input: AddCommentInput!): Comment!
+
+    "Deletes a comment by ID. Requires ADMIN role. Returns true if deleted, false if not found."
     deleteComment(id: ID!): Boolean
+}
+
+"Real-time event pushed over WebSocket to all active subscribers whenever a new comment is saved."
+type Subscription {
+    "Subscribe to new comments on a specific post. Emits each new Comment as it is saved."
+    commentAdded(postId: ID!): Comment!
 }
 
 # --- Types ---
 
+"A registered user of the blog."
 type User {
     id: ID!
+    "Display name of the user."
     name: String!
+    "Unique email address."
     email: String!
+    "All posts authored by this user. Batch-loaded to avoid N+1."
     posts: [Post!]!
 }
 
+"A blog post authored by a user."
 type Post {
     id: ID!
     title: String!
     content: String!
+    "The user who wrote this post. Batch-loaded to avoid N+1."
     author: User!
+    "All comments on this post. Batch-loaded to avoid N+1."
     comments: [Comment!]!
 }
 
+"A comment left on a post by a user."
 type Comment {
     id: ID!
+    "The comment body."
     text: String!
+    "The user who wrote this comment. Batch-loaded to avoid N+1."
     author: User!
+    "The post this comment belongs to."
     post: Post!
 }
 
-type Subscription {
-    commentAdded(postId: ID!): Comment!
-}
+# --- Pagination Types (Relay Connection pattern) ---
 
-# --- Pagination Types ---
-
+"A paginated list of posts. Wraps edges, pageInfo, and totalCount."
 type PostConnection {
+    "The posts on this page, each wrapped in an edge with its cursor."
     edges: [PostEdge!]!
+    "Metadata about the current page position in the full list."
     pageInfo: PageInfo!
+    "Total number of posts across all pages."
     totalCount: Int!
 }
 
+"An envelope around a single Post that carries its cursor alongside the data."
 type PostEdge {
+    "The Post on this edge."
     node: Post!
+    "Opaque base64 cursor pointing to this specific item. Pass as `after` to start the next page from here."
     cursor: String!
 }
 
+"Metadata about the current page in a connection query."
 type PageInfo {
+    "True if there are more items after this page."
     hasNextPage: Boolean!
+    "True if there are items before this page."
     hasPreviousPage: Boolean!
+    "Cursor of the first item on this page."
     startCursor: String
+    "Cursor of the last item on this page. Pass as `after` to fetch the next page."
     endCursor: String
 }
 
 # --- Input Types ---
 
+"Fields required to create a new user."
 input CreateUserInput {
     name: String!
     email: String!
 }
 
+"Fields required to create a new post."
 input CreatePostInput {
     title: String!
     content: String!
+    "ID of the user who will be set as the author."
     authorId: ID!
 }
 
+"Fields required to add a comment to a post."
 input AddCommentInput {
+    "The comment body."
     text: String!
+    "ID of the post to comment on."
     postId: ID!
+    "ID of the user posting the comment."
     authorId: ID!
 }

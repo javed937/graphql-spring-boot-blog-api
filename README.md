@@ -13,6 +13,18 @@ A hands-on blog API GraphQL using Spring Boot 3, Spring Data JPA, and H2. Covers
 | H2 Database | in-memory |
 | Lombok | latest |
 
+## Features Implemented
+
+| Feature | Details |
+|---------|---------|
+| GraphQL Schema | Queries, mutations, subscriptions, input types |
+| CRUD | Users, Posts, Comments with full relationships |
+| N+1 Fix | `DataLoader` + `BatchLoaderRegistry` batching |
+| Pagination | Relay connection pattern with cursor-based navigation |
+| Error Handling | `DataFetcherExceptionResolver` with structured error codes |
+| Subscriptions | Real-time `commentAdded` via WebSocket (`graphql-ws`) |
+| Security | Spring Security with role-based `@PreAuthorize` on mutations |
+
 ## Domain Model
 
 ```
@@ -62,6 +74,15 @@ mvnw.cmd spring-boot:run
 
 Press **F5** → select **"Run Spring Boot"**. Set breakpoints in `BlogController.java` or `BlogService.java` before firing queries.
 
+## Users (for testing)
+
+| Username | Password | Role |
+|----------|----------|------|
+| `user` | `password` | USER — can query, createPost, addComment |
+| `admin` | `admin` | ADMIN — full access including delete, createUser |
+
+Login at **http://localhost:8080/login** before using secured mutations.
+
 ## URLs
 
 | URL | Purpose |
@@ -84,82 +105,148 @@ Press **F5** → select **"Run Spring Boot"**. Set breakpoints in `BlogControlle
 
 ```graphql
 type Query {
+    "Returns all users. Nested posts are batch-loaded via DataLoader (no N+1)."
     users: [User!]!
+
+    "Returns a single user by ID. Throws NOT_FOUND if the ID does not exist."
     user(id: ID!): User
+
+    "Returns all posts. Author and comments are batch-loaded via DataLoader."
     posts: [Post!]!
+
+    "Returns a single post by ID. Throws NOT_FOUND if the ID does not exist."
     post(id: ID!): Post
+
+    "Returns all posts written by a specific user. Returns an empty list if the user has no posts."
     postsByUser(userId: ID!): [Post!]!
+
+    "Returns all comments on a specific post."
     commentsByPost(postId: ID!): [Comment!]!
+
+    "Returns a single comment by ID. Throws NOT_FOUND if the ID does not exist."
     commentsById(commentId: ID!): Comment
+
+    """
+    Returns a cursor-paginated list of posts using the Relay Connection pattern.
+    - first: number of posts to return (default 10)
+    - after: opaque cursor from a previous response's endCursor; omit to start from the beginning
+    """
     postsConnection(first: Int, after: String): PostConnection!
 }
 
 type Mutation {
+    "Creates a new user. Requires ADMIN role. Returns the created user."
     createUser(input: CreateUserInput!): User!
+
+    "Creates a new post. Requires authentication. authorId must reference an existing user."
     createPost(input: CreatePostInput!): Post!
+
+    """
+    Deletes a post and all its comments (cascade). Requires ADMIN role.
+    Returns true if deleted, false if the ID was not found.
+    """
     deletePost(id: ID!): Boolean!
+
+    """
+    Adds a comment to a post. Requires authentication.
+    Publishes the saved comment to the commentAdded subscription for real-time delivery.
+    """
     addComment(input: AddCommentInput!): Comment!
+
+    "Deletes a comment by ID. Requires ADMIN role. Returns true if deleted, false if not found."
     deleteComment(id: ID!): Boolean
 }
 
+"Real-time event pushed over WebSocket to all active subscribers whenever a new comment is saved."
 type Subscription {
+    "Subscribe to new comments on a specific post. Emits each new Comment as it is saved."
     commentAdded(postId: ID!): Comment!
 }
 
+"A registered user of the blog."
 type User {
     id: ID!
+    "Display name of the user."
     name: String!
+    "Unique email address."
     email: String!
+    "All posts authored by this user. Batch-loaded to avoid N+1."
     posts: [Post!]!
 }
 
+"A blog post authored by a user."
 type Post {
     id: ID!
     title: String!
     content: String!
+    "The user who wrote this post. Batch-loaded to avoid N+1."
     author: User!
+    "All comments on this post. Batch-loaded to avoid N+1."
     comments: [Comment!]!
 }
 
+"A comment left on a post by a user."
 type Comment {
     id: ID!
+    "The comment body."
     text: String!
+    "The user who wrote this comment. Batch-loaded to avoid N+1."
     author: User!
+    "The post this comment belongs to."
     post: Post!
 }
 
+"A paginated list of posts. Wraps edges, pageInfo, and totalCount."
 type PostConnection {
+    "The posts on this page, each wrapped in an edge with its cursor."
     edges: [PostEdge!]!
+    "Metadata about the current page position in the full list."
     pageInfo: PageInfo!
+    "Total number of posts across all pages."
     totalCount: Int!
 }
 
+"An envelope around a single Post that carries its cursor alongside the data."
 type PostEdge {
+    "The Post on this edge."
     node: Post!
+    "Opaque base64 cursor pointing to this specific item. Pass as `after` to start the next page from here."
     cursor: String!
 }
 
+"Metadata about the current page in a connection query."
 type PageInfo {
+    "True if there are more items after this page."
     hasNextPage: Boolean!
+    "True if there are items before this page."
     hasPreviousPage: Boolean!
+    "Cursor of the first item on this page."
     startCursor: String
+    "Cursor of the last item on this page. Pass as `after` to fetch the next page."
     endCursor: String
 }
 
+"Fields required to create a new user."
 input CreateUserInput {
     name: String!
     email: String!
 }
 
+"Fields required to create a new post."
 input CreatePostInput {
     title: String!
     content: String!
+    "ID of the user who will be set as the author."
     authorId: ID!
 }
 
+"Fields required to add a comment to a post."
 input AddCommentInput {
+    "The comment body."
     text: String!
+    "ID of the post to comment on."
     postId: ID!
+    "ID of the user posting the comment."
     authorId: ID!
 }
 ```
@@ -352,7 +439,63 @@ curl -s http://localhost:8080/graphql \
 
 #### `postsConnection(first, after)` — cursor-paginated posts
 
-Implements the Relay connection pattern. `first` sets the page size (default 10). `after` is an opaque base64 cursor taken from a previous response's `endCursor`. Omit `after` to start from the beginning.
+##### Why cursor pagination instead of `LIMIT / OFFSET`?
+
+Offset pagination (`page=2&size=10`) has a fundamental flaw: if a row is inserted or deleted between two requests, the window shifts and you either skip items or see duplicates. Cursor pagination solves this by pointing to a **specific item** in the list rather than a numeric position. The cursor moves forward through a stable, ordered sequence, so inserts and deletes between pages never corrupt your results.
+
+---
+
+##### The Relay Connection pattern
+
+The [Relay Connection spec](https://relay.dev/graphql/connections.htm) defines a standard shape that every GraphQL client understands. Instead of returning a plain list, a connection query returns a **wrapper object** with three parts:
+
+```
+postsConnection
+├── totalCount          ← total items in the full dataset
+├── pageInfo            ← metadata about where you are in the list
+│   ├── hasNextPage     ← true if there are more items after this page
+│   ├── hasPreviousPage ← true if there are items before this page
+│   ├── startCursor     ← cursor of the first item on this page
+│   └── endCursor       ← cursor of the last item — pass this as `after` for the next page
+└── edges               ← the items on this page, each wrapped in an "edge"
+    └── edge
+        ├── cursor      ← opaque pointer to THIS specific item
+        └── node        ← the actual Post object
+```
+
+---
+
+##### What is an Edge?
+
+An **edge** is the envelope around a single item. It exists so the connection can carry **per-item metadata** alongside the item itself. In a social graph, the edge might carry `followedAt` or `relationshipType`. In this project the edge carries only `cursor`, but the pattern is extensible without changing the `Post` type.
+
+```
+edges [
+  { cursor: "Y3Vyc29yOjA=",  node: { id: "1", title: "Hello GraphQL" } },
+  { cursor: "Y3Vyc29yOjE=",  node: { id: "2", title: "Spring Boot Tips" } }
+]
+```
+
+---
+
+##### What is a Cursor?
+
+A cursor is an **opaque, stable pointer** to one item. "Opaque" means the client treats it as a black box — it never parses or constructs it. It just stores the value and passes it back.
+
+In this project cursors are base64-encoded strings of the form `cursor:<index>`:
+
+```
+"cursor:0"  →  base64 encode  →  "Y3Vyc29yOjA="
+"cursor:1"  →  base64 encode  →  "Y3Vyc29yOjE="
+```
+
+The server decodes the cursor, extracts the index, derives the correct DB page number, and loads the next slice. The client never needs to know any of this.
+
+---
+
+##### Step-by-step walkthrough
+
+**Request — first page (no cursor)**
 
 ```graphql
 query {
@@ -360,6 +503,7 @@ query {
     totalCount
     pageInfo {
       hasNextPage
+      startCursor
       endCursor
     }
     edges {
@@ -370,14 +514,57 @@ query {
 }
 ```
 
+**Response**
+
+```json
+{
+  "data": {
+    "postsConnection": {
+      "totalCount": 2,
+      "pageInfo": {
+        "hasNextPage": false,
+        "startCursor": "Y3Vyc29yOjA=",
+        "endCursor":   "Y3Vyc29yOjE="
+      },
+      "edges": [
+        { "cursor": "Y3Vyc29yOjA=", "node": { "id": "1", "title": "Hello GraphQL",   "author": { "name": "Alice" } } },
+        { "cursor": "Y3Vyc29yOjE=", "node": { "id": "2", "title": "Spring Boot Tips", "author": { "name": "Bob"   } } }
+      ]
+    }
+  }
+}
+```
+
+`hasNextPage: false` means you are on the last page. If there were more posts, you would take `endCursor` (`"Y3Vyc29yOjE="`) and pass it as `after` in the next request:
+
+**Request — next page**
+
+```graphql
+query {
+  postsConnection(first: 2, after: "Y3Vyc29yOjE=") {
+    pageInfo { hasNextPage endCursor }
+    edges {
+      cursor
+      node { id title }
+    }
+  }
+}
+```
+
+The server decodes `"Y3Vyc29yOjE="` → `"cursor:1"` → index `1`, then loads the next 2 items starting after index 1.
+
+---
+
+##### Curl commands
+
 ```bash
-# First page
+# First page — no cursor needed
 curl -s http://localhost:8080/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
-  -d '{"query":"{ postsConnection(first: 2) { totalCount pageInfo { hasNextPage endCursor } edges { cursor node { id title author { name } } } } }"}'
+  -d '{"query":"{ postsConnection(first: 2) { totalCount pageInfo { hasNextPage startCursor endCursor } edges { cursor node { id title author { name } } } } }"}'
 
-# Next page — replace the after value with endCursor from the previous response
+# Next page — pass endCursor from the previous response as `after`
 curl -s http://localhost:8080/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" \
@@ -513,6 +700,170 @@ curl -s http://localhost:8080/graphql \
   -H "Authorization: Basic YWRtaW46YWRtaW4=" \
   -d '{"query":"mutation { deleteComment(id: \"1\") }"}'
 ```
+
+## The N+1 Problem and DataLoader
+
+### What is the N+1 Problem?
+
+The N+1 problem occurs when GraphQL resolves a list of N items (1 query) and then fires a separate database query for each item to load a nested field — totalling **N+1 queries**. The number grows linearly with the dataset, making it a silent performance killer.
+
+### Concrete Example — Before DataLoader
+
+Take this query:
+
+```graphql
+query {
+  users {
+    id
+    name
+    posts { id title }
+  }
+}
+```
+
+With 2 users (Alice and Bob), a naive resolver fires:
+
+```sql
+-- Query 1: fetch all users
+SELECT * FROM users;
+-- result: Alice (id=1), Bob (id=2)
+
+-- Query 2: fetch posts for Alice
+SELECT * FROM posts WHERE author_id = 1;
+
+-- Query 3: fetch posts for Bob
+SELECT * FROM posts WHERE author_id = 2;
+```
+
+**3 queries for 2 users.** With 100 users it becomes 101 queries. The pattern is always 1 + N.
+
+Now add nested comments:
+
+```graphql
+query {
+  users {
+    name
+    posts {
+      title
+      comments { text }
+    }
+  }
+}
+```
+
+With 2 users and 2 posts each:
+
+```
+1  query  → fetch all users
+2  queries → fetch posts for each user      (N = users)
+4  queries → fetch comments for each post   (N = posts)
+─────────────────────────────────────────
+7  total queries
+```
+
+Scale to 50 users with 10 posts each → **1 + 50 + 500 = 551 queries** for one GraphQL request.
+
+---
+
+### How DataLoader Solves It
+
+DataLoader works in two steps:
+
+1. **Collect** — instead of hitting the DB immediately, each resolver queues its required ID into a batch.
+2. **Flush** — once all resolvers in the current execution wave have queued their IDs, DataLoader fires **one query** with an `IN (...)` clause covering all of them.
+
+The same query with DataLoader:
+
+```sql
+-- Query 1: fetch all users
+SELECT * FROM users;
+
+-- Query 2: fetch ALL posts for ALL users in one shot
+SELECT * FROM posts WHERE author_id IN (1, 2);
+```
+
+**2 queries regardless of how many users there are.** With 100 users it is still 2 queries.
+
+---
+
+### How It Is Implemented in This Project
+
+**`DataLoaderConfig.java`** registers three batch loaders with Spring's `BatchLoaderRegistry`:
+
+```java
+// Collects all userIds seen in one request, fires ONE query: WHERE author_id IN (...)
+registry.<Long, List<Post>>forName("postsForUser")
+    .registerMappedBatchLoader((authorIds, env) ->
+        Mono.fromCallable(() -> blogService.getPostsByAuthorIds(authorIds)));
+
+// Collects all postIds seen in one request, fires ONE query: WHERE post_id IN (...)
+registry.<Long, List<Comment>>forName("commentsForPost")
+    .registerMappedBatchLoader((postIds, env) ->
+        Mono.fromCallable(() -> blogService.getCommentsByPostIds(postIds)));
+
+// Shared loader for Post.author and Comment.author — fires ONE query: WHERE id IN (...)
+registry.<Long, User>forName("userById")
+    .registerMappedBatchLoader((userIds, env) ->
+        Mono.fromCallable(() -> blogService.getUsersByIds(userIds)));
+```
+
+Each `registerMappedBatchLoader` receives a full `Set` of IDs (all IDs seen across the whole request) and returns a `Map` so DataLoader can distribute results back to the right resolver.
+
+**`BlogController.java`** — the resolver does not call the DB; it just queues an ID:
+
+```java
+@SchemaMapping(typeName = "User", field = "posts")
+public CompletableFuture<List<Post>> postsForUser(User user,
+                                                  DataLoader<Long, List<Post>> postsForUser) {
+    return postsForUser.load(user.getId()); // ← queued, NOT fired yet
+}
+```
+
+`postsForUser.load(userId)` returns a `CompletableFuture` that will be completed later — after Spring has called all `User` resolvers and collected every `userId`. Only then does it flush the batch and invoke the `registerMappedBatchLoader` with all IDs at once.
+
+**`BlogService.java`** — the batch methods use `IN` queries:
+
+```java
+public Map<Long, List<Post>> getPostsByAuthorIds(Set<Long> authorIds) {
+    return postRepository.findByAuthorIdIn(authorIds).stream()
+        .collect(Collectors.groupingBy(p -> p.getAuthor().getId()));
+}
+```
+
+`findByAuthorIdIn` translates to `WHERE author_id IN (1, 2, ...)`. The result is grouped into a `Map<userId, List<Post>>` so DataLoader can route each post list back to the correct user.
+
+---
+
+### The Three DataLoaders in This Project
+
+| Name | Batches | SQL generated |
+|------|---------|---------------|
+| `postsForUser` | All `userId`s from `User.posts` fields | `SELECT * FROM posts WHERE author_id IN (...)` |
+| `commentsForPost` | All `postId`s from `Post.comments` fields | `SELECT * FROM comments WHERE post_id IN (...)` |
+| `userById` | All `userId`s from `Post.author` + `Comment.author` | `SELECT * FROM users WHERE id IN (...)` |
+
+`userById` is shared across two fields — both `Post.author` and `Comment.author` feed into the same loader, so even a mixed query loading both still fires only one `SELECT` for users.
+
+---
+
+### SQL Logs — Before vs After
+
+`spring.jpa.show-sql=true` is intentionally enabled so you can observe the difference in the console.
+
+**Without DataLoader** — `users` with nested `posts`:
+```
+Hibernate: select * from users
+Hibernate: select * from posts where author_id=1
+Hibernate: select * from posts where author_id=2
+```
+
+**With DataLoader** — same query, same data:
+```
+Hibernate: select * from users
+Hibernate: select * from posts where author_id in (?, ?)
+```
+
+---
 
 ## Testing Real-Time Subscriptions
 
@@ -651,29 +1002,3 @@ curl -s http://localhost:8080/graphql \
 ```
 
 The first terminal will print the pushed event within milliseconds.
-
-## Features Implemented
-
-| Feature | Details |
-|---------|---------|
-| GraphQL Schema | Queries, mutations, subscriptions, input types |
-| CRUD | Users, Posts, Comments with full relationships |
-| N+1 Fix | `DataLoader` + `BatchLoaderRegistry` batching |
-| Pagination | Relay connection pattern with cursor-based navigation |
-| Error Handling | `DataFetcherExceptionResolver` with structured error codes |
-| Subscriptions | Real-time `commentAdded` via WebSocket (`graphql-ws`) |
-| Security | Spring Security with role-based `@PreAuthorize` on mutations |
-
-## Users (for testing)
-
-| Username | Password | Role |
-|----------|----------|------|
-| `user` | `password` | USER — can query, createPost, addComment |
-| `admin` | `admin` | ADMIN — full access including delete, createUser |
-
-Login at **http://localhost:8080/login** before using secured mutations.
-
-## Known Issues / Notes
-
-- Spring Boot 3.3.0's built-in GraphiQL UI references `graphiql@5.2.2` on unpkg CDN which has broken file paths — `graphiql.min.js` was moved in v5. The built-in UI is disabled and replaced with a custom `static/graphiql.html` pinned to `graphiql@3.7.1`.
-- SQL logging is enabled (`spring.jpa.show-sql=true`) intentionally — useful for observing the N+1 problem before Phase 4.
